@@ -122,10 +122,12 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
-        annotated: tensor-level AC — recompute only the tensors marked with
-            ``tensor_checkpoint`` in model code and save everything else.
-            Models must annotate tensors themselves (the llama3 graph trainer
-            model does so for the attention/FFN norm outputs).
+        annotated: tensor-level AC — mark the tensors passed to
+            ``tensor_checkpoint`` in model code MUST_RECOMPUTE on top of the
+            default SAC decision, so an annotation only ever removes a saved
+            activation. Models must annotate tensors themselves (the llama3
+            graph trainer model annotates the norm outputs and the fused QKV
+            projection output).
     """
 
     full_recompute_save_ops: str = ""
