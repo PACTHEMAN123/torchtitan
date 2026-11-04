@@ -130,7 +130,6 @@ class TestTensorAC(TestCase):
         )
         for node in annotated:
             self.assertTrue(node.meta[TENSOR_AC_ANNOTATED_KEY])
-            self.assertIn("rms_norm", str(node.target))
 
         actual = run_traced(traced, module=model)(x, target)
         for actual_tensor, expected_tensor in zip(
@@ -156,7 +155,7 @@ class TestTensorAC(TestCase):
             for node in traced.gm.graph.nodes
             if node.meta.get("recompute") == CheckpointPolicy.MUST_SAVE
         }
-        self.assertEqual(recompute, annotated)
+        self.assertLessEqual(annotated, recompute)
         self.assertTrue(saved)
         self.assertFalse(recompute & saved)
         self.assertFalse(

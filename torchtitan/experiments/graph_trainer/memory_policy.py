@@ -420,10 +420,18 @@ def _eager_memory_policy_pass(
 
 
 def _make_annotated_memory_policy() -> Callable:
-    """Recompute only tensors marked with ``tensor_checkpoint``; save the rest."""
+    """Recompute annotated tensors and the views on their path; save the rest.
+
+    Views are recompute-only: they are free to rebuild and an unannotated view
+    would otherwise sit between an annotated tensor and its backward consumer,
+    pinning the annotated storage through the whole backward pass.
+    """
+    op_types = get_default_op_list()
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if node.meta.get(TENSOR_AC_ANNOTATED_KEY, False):
+            return CheckpointPolicy.MUST_RECOMPUTE
+        if node.target is not operator.getitem and op_types.is_view(node):
             return CheckpointPolicy.MUST_RECOMPUTE
         return CheckpointPolicy.MUST_SAVE
 
