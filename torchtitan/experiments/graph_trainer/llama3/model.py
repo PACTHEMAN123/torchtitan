@@ -51,37 +51,36 @@ def _forward_with_tensor_ac(
     return out
 
 
-class _CheckpointedActivation(nn.Module):
-    """SwiGLU activation whose output is annotated for tensor-level AC.
+def _annotate_module_output(module: nn.Module) -> None:
+    """Wrap ``module.forward`` so its output is annotated in the traced graph.
 
-    The activation output is the widest tensor in the block (``[tokens,
-    ffn_dim]``) and its only consumer is the ``w2`` projection, so dropping it
-    after the forward pass and rebuilding it in backward trades a cheap
-    elementwise recompute for the largest saved activation.
+    Wrapping the instance method instead of inserting a child module keeps the
+    module's FQN (and therefore its layer id and boundary metadata) unchanged.
     """
+    forward = module.forward
 
-    def __init__(self, activation_fn: nn.Module) -> None:
-        super().__init__()
-        self.activation_fn = activation_fn
+    def forward_with_annotation(self, *args, **kwargs):
+        return tensor_checkpoint(forward(*args, **kwargs))
 
-    def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
-        return tensor_checkpoint(self.activation_fn(gate, up))
+    module.forward = types.MethodType(forward_with_annotation, module)
 
 
 def annotate_tensor_ac(model: GraphTrainerLlama3Model) -> int:
     """Mark per-block tensors for tensor-level activation checkpointing.
 
     Each block annotates its norm outputs (cheap to rebuild, single forward
-    consumer) and the FFN activation output. Returns the number of annotated
-    blocks.
+    consumer) and the fused QKV projection output. The QKV output is the tensor
+    the default SAC policy deliberately saves — attention backward reads q/k/v
+    — so annotating it is what trades recompute for memory: the projection is
+    rerun in backward instead of keeping ``[tokens, 3 * dim]`` alive per layer.
+    Returns the number of annotated blocks.
     """
     layers = model.get_submodule("layers")
     count = 0
     for layer in layers.values():
         layer.forward = types.MethodType(_forward_with_tensor_ac, layer)
-        feed_forward = layer.feed_forward
-        feed_forward.activation_fn = _CheckpointedActivation(
-            feed_forward.activation_fn
-        )
+        # The split into q/k/v views happens above ``wqkv``; annotating the
+        # linear output itself lets the recompute drop the whole tensor.
+        _annotate_module_output(layer.attention.qkv_linear.wqkv)
         count += 1
     return count
