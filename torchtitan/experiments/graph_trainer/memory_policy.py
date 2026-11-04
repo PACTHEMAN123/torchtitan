@@ -420,20 +420,39 @@ def _eager_memory_policy_pass(
 
 
 def _make_annotated_memory_policy() -> Callable:
-    """Recompute annotated tensors and the views on their path; save the rest.
+    """Tensor-level AC layered on top of the default SAC policy.
 
-    Views are recompute-only: they are free to rebuild and an unannotated view
-    would otherwise sit between an annotated tensor and its backward consumer,
-    pinning the annotated storage through the whole backward pass.
+    Annotated tensors become MUST_RECOMPUTE, so the remat pass drops them after
+    their last forward use and rebuilds them in backward. Views that carry an
+    annotated tensor towards a backward consumer are also MUST_RECOMPUTE: a
+    saved view would pin the annotated storage through the whole backward pass,
+    and the remat pass only follows MUST_RECOMPUTE nodes when collecting a
+    recompute subgraph.
+
+    Every other node keeps the default policy's decision. An annotation can
+    therefore only remove saved activations, never add any — enabling tensor
+    annotations is bounded above by the default SAC memory profile.
     """
+    default_policy = _make_default_memory_policy()
     op_types = get_default_op_list()
+
+    def is_annotated_view(node: torch.fx.Node) -> bool:
+        if node.target is operator.getitem or not op_types.is_view(node):
+            return False
+        # Nodes are visited in graph order, so an upstream view already carries
+        # its recompute tag; that makes view chains propagate transitively.
+        return any(
+            inp.meta.get(TENSOR_AC_ANNOTATED_KEY, False)
+            or inp.meta.get("recompute") == CheckpointPolicy.MUST_RECOMPUTE
+            for inp in node.all_input_nodes
+        )
 
     def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
         if node.meta.get(TENSOR_AC_ANNOTATED_KEY, False):
             return CheckpointPolicy.MUST_RECOMPUTE
-        if node.target is not operator.getitem and op_types.is_view(node):
+        if is_annotated_view(node):
             return CheckpointPolicy.MUST_RECOMPUTE
-        return CheckpointPolicy.MUST_SAVE
+        return default_policy(node)
 
     return policy_fn
 

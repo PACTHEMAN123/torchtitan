@@ -8,6 +8,7 @@ import types
 from dataclasses import dataclass
 
 import torch
+from torch import nn
 
 from torchtitan.experiments.graph_trainer.tensor_ac import tensor_checkpoint
 from torchtitan.models.llama3 import Llama3Model
@@ -50,16 +51,37 @@ def _forward_with_tensor_ac(
     return out
 
 
-def annotate_tensor_ac(model: GraphTrainerLlama3Model) -> int:
-    """Mark per-block norm outputs for tensor-level activation checkpointing.
+class _CheckpointedActivation(nn.Module):
+    """SwiGLU activation whose output is annotated for tensor-level AC.
 
-    The norm outputs have a single forward consumer and are cheap to recompute,
-    so dropping them after their last forward use trades a small amount of
-    compute for the saved activation. Returns the number of annotated blocks.
+    The activation output is the widest tensor in the block (``[tokens,
+    ffn_dim]``) and its only consumer is the ``w2`` projection, so dropping it
+    after the forward pass and rebuilding it in backward trades a cheap
+    elementwise recompute for the largest saved activation.
+    """
+
+    def __init__(self, activation_fn: nn.Module) -> None:
+        super().__init__()
+        self.activation_fn = activation_fn
+
+    def forward(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        return tensor_checkpoint(self.activation_fn(gate, up))
+
+
+def annotate_tensor_ac(model: GraphTrainerLlama3Model) -> int:
+    """Mark per-block tensors for tensor-level activation checkpointing.
+
+    Each block annotates its norm outputs (cheap to rebuild, single forward
+    consumer) and the FFN activation output. Returns the number of annotated
+    blocks.
     """
     layers = model.get_submodule("layers")
     count = 0
     for layer in layers.values():
         layer.forward = types.MethodType(_forward_with_tensor_ac, layer)
+        feed_forward = layer.feed_forward
+        feed_forward.activation_fn = _CheckpointedActivation(
+            feed_forward.activation_fn
+        )
         count += 1
     return count
