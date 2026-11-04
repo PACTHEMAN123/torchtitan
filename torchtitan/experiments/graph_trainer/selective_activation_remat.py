@@ -400,6 +400,12 @@ def selective_activation_remat_pass(
             )
             gm.graph.erase_node(orig)
 
+    logger.info(
+        "Rematerialized %d forward tensor(s) ahead of %d backward consumer(s)",
+        len(recomputed_nodes),
+        len(direct_bwd_consumers),
+    )
+
     # raise_getitems pass for better memory (like default_partition)
     gm = raise_getitems(gm)
 
