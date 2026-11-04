@@ -57,6 +57,10 @@ from torchtitan.experiments.graph_trainer.registry import (
     MEMORY_POLICY_REGISTRY,
     register_memory_policy,
 )
+from torchtitan.experiments.graph_trainer.tensor_ac import (
+    TENSOR_AC_ANNOTATED_KEY,
+    strip_tensor_checkpoint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -409,6 +413,39 @@ def _eager_memory_policy_pass(
     return gm
 
 
+def _make_annotated_memory_policy() -> Callable:
+    """Recompute only tensors marked with ``tensor_checkpoint``; save the rest."""
+
+    def policy_fn(node: torch.fx.Node) -> CheckpointPolicy:
+        if node.meta.get(TENSOR_AC_ANNOTATED_KEY, False):
+            return CheckpointPolicy.MUST_RECOMPUTE
+        return CheckpointPolicy.MUST_SAVE
+
+    return policy_fn
+
+
+@register_memory_policy("annotated")
+def _annotated_memory_policy_pass(
+    gm: torch.fx.GraphModule,
+    *,
+    config: "GraphTrainer.Config",
+) -> torch.fx.GraphModule:
+    """Tensor-level AC driven by ``tensor_checkpoint`` annotations in model code."""
+    fsdp_reshard_after_forward = get_fsdp_reshard_after_forward_policy(
+        config.parallelism.fsdp_reshard_after_forward,
+        pp_enabled=config.parallelism.pipeline_parallel_degree > 1,
+    )
+    force_save_nodes = (
+        _find_fsdp_unshard_save_nodes(gm) if not fsdp_reshard_after_forward else None
+    )
+    tag_sac_policy(
+        gm,
+        policy_fn=_make_annotated_memory_policy(),
+        force_save_nodes=force_save_nodes,
+    )
+    return gm
+
+
 def _is_backward_side(node: torch.fx.Node, backward_side: set[torch.fx.Node]) -> bool:
     return _is_backward_node(node) or any(
         inp in backward_side for inp in node.all_input_nodes
@@ -576,6 +613,7 @@ def tag_with_memory_policy_pass(
         eager: SAC alternating mm ops between save/recompute.
         min_cut: choose saved activations with the min-cut partitioner.
         sac_and_offload: SAC + CPU offload within budget.
+        annotated: recompute only tensors marked with ``tensor_checkpoint``.
 
     Other memory policies combining SAC and CPU offload can be added
     via ``register_memory_policy`` without modifying this function.
@@ -586,6 +624,14 @@ def tag_with_memory_policy_pass(
         raise ValueError(
             f"Unknown memory_policy: {memory_policy!r}. "
             f"Available: {list(MEMORY_POLICY_REGISTRY.keys())}"
+        )
+
+    annotated = strip_tensor_checkpoint(gm)
+    if annotated:
+        logger.info(
+            "Tensor AC: %d annotated tensor(s) under memory policy %r",
+            len(annotated),
+            memory_policy,
         )
 
     gm = MEMORY_POLICY_REGISTRY[memory_policy](gm, config=config)

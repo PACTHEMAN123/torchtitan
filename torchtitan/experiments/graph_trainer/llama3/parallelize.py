@@ -12,7 +12,10 @@ from torchtitan.experiments.graph_trainer.common_utils import (
     apply_simple_fsdp,
 )
 from torchtitan.experiments.graph_trainer.compile import apply_compile
-from torchtitan.experiments.graph_trainer.llama3.model import GraphTrainerLlama3Model
+from torchtitan.experiments.graph_trainer.llama3.model import (
+    annotate_tensor_ac,
+    GraphTrainerLlama3Model,
+)
 
 
 def annotate_llama(model: GraphTrainerLlama3Model) -> None:
@@ -50,6 +53,8 @@ def parallelize_llama(
         ({parallel_dims.tp}) and 2 * CP degree ({parallel_dims.cp}), i.e. {parallel_dims.seq_len_divisor}.
         """
 
+    if getattr(compile_config, "memory_policy", None) == "annotated":
+        annotate_tensor_ac(model)
     annotate_llama(model)
 
     model.parallelize(parallel_dims)

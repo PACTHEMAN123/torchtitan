@@ -108,7 +108,7 @@ class GraphTrainerCompileConfig(CompileConfig):
     """Log timing, op-count diffs, and before/after graphs for each pass to tlparse."""
 
     memory_policy: Literal[
-        "default", "full", "eager", "min_cut", "sac_and_offload"
+        "default", "full", "eager", "min_cut", "sac_and_offload", "annotated"
     ] = "default"
     """
     Memory optimization policy for activation management (SAC, offload).
@@ -122,6 +122,10 @@ class GraphTrainerCompileConfig(CompileConfig):
         sac_and_offload: SAC + CPU offload — apply default SAC first,
             then offload surviving MUST_SAVE activations to CPU within
             the cpu_offload_budget_gb budget.
+        annotated: tensor-level AC — recompute only the tensors marked with
+            ``tensor_checkpoint`` in model code and save everything else.
+            Models must annotate tensors themselves (the llama3 graph trainer
+            model does so for the attention/FFN norm outputs).
     """
 
     full_recompute_save_ops: str = ""
