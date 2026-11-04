@@ -283,6 +283,12 @@ def tag_sac_policy(
             operator.getitem,
             torch.ops._c10d_functional.wait_tensor.default,
         ):
+            # An explicit tensor-level annotation wins over inheritance: the
+            # annotated tensor is the getitem result, not the multi-output
+            # parent, so the policy's tag is the meaningful one.
+            if node.meta.get(TENSOR_AC_ANNOTATED_KEY, False):
+                node.meta["recompute"] = policy_fn(node)
+                continue
             # Propagate from parent: getitem extracts tuple elements,
             # wait_tensor is tied to its async collective — both must
             # share the parent's save/recompute decision.

@@ -4,6 +4,8 @@
 # This source code is licensed under the BSD-style license found in the
 # LICENSE file in the root directory of this source tree.
 
+import operator
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -42,12 +44,27 @@ NUM_LAYERS = 2
 class _Block(nn.Module):
     def __init__(self, dim: int) -> None:
         super().__init__()
-        self.norm = nn.LayerNorm(dim)
+        # Single-output norm, like the RMSNorm used in the llama3 blocks: the
+        # annotation then names the norm op itself rather than a tuple slice.
+        self.norm = nn.RMSNorm(dim)
         self.linear = nn.Linear(dim, dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = tensor_checkpoint(self.norm(x))
         return x + F.silu(self.linear(h))
+
+
+class _TupleNormModel(nn.Module):
+    """LayerNorm returns a tuple, so the annotated tensor is a ``getitem``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(DIM)
+        self.head = nn.Linear(DIM, HEAD_DIM, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = tensor_checkpoint(self.norm(x))
+        return self.head(F.silu(h))
 
 
 class _ToyModel(nn.Module):
@@ -113,7 +130,7 @@ class TestTensorAC(TestCase):
         )
         for node in annotated:
             self.assertTrue(node.meta[TENSOR_AC_ANNOTATED_KEY])
-            self.assertIn("layer_norm", str(node.target))
+            self.assertIn("rms_norm", str(node.target))
 
         actual = run_traced(traced, module=model)(x, target)
         for actual_tensor, expected_tensor in zip(
@@ -148,6 +165,23 @@ class TestTensorAC(TestCase):
                 for node in traced.gm.graph.nodes
                 if _is_backward_node(node) and "recompute" in node.meta
             ]
+        )
+
+    def test_annotation_wins_over_getitem_parent_tagging(self) -> None:
+        model = _TupleNormModel()
+        annotate_module_fqns(model)
+        traced, _, _ = _trace(model)
+        annotated = strip_tensor_checkpoint(traced.gm)
+
+        self.assertEqual(len(annotated), 1)
+        (node,) = annotated
+        self.assertEqual(node.target, operator.getitem)
+
+        tag_sac_policy(traced.gm, policy_fn=_make_annotated_memory_policy())
+
+        self.assertEqual(node.meta["recompute"], CheckpointPolicy.MUST_RECOMPUTE)
+        self.assertEqual(
+            node.args[0].meta["recompute"], CheckpointPolicy.MUST_SAVE
         )
 
     def test_remat_inserts_recompute_and_matches_eager_numerics(self) -> None:
