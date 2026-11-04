@@ -26,14 +26,19 @@ import torch.fx as fx
 
 TENSOR_AC_ANNOTATED_KEY = "tensor_ac_annotated"
 
+# The library must outlive registration: recent torch versions deregister an
+# op's schema when its ``Library`` object is collected.
+_CHECKPOINT_LIB: torch.library.Library | None = None
+
 
 def _register_checkpoint_op() -> "torch._ops.OpOverload":
+    global _CHECKPOINT_LIB
     try:
         return torch.ops.tensor_ac.checkpoint.default
     except AttributeError:
         pass
 
-    lib = torch.library.Library("tensor_ac", "FRAGMENT")
+    lib = _CHECKPOINT_LIB = torch.library.Library("tensor_ac", "FRAGMENT")
     lib.define("checkpoint(Tensor x) -> Tensor")
     # The marker returns its input without copying. ``torch.library.custom_op``
     # rejects aliasing returns, so register at the dispatcher level instead.
